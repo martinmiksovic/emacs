@@ -2740,7 +2740,7 @@ that use a window system such as X, and false for text-only terminals.
 DISPLAY can be a display name, a frame, or nil (meaning the selected
 frame's display)."
   (not (null (memq (framep-on-display display) '(x w32 ns pgtk haiku
-                                                   android)))))
+                                                   android remote)))))
 
 (defun display-images-p (&optional display)
   "Return non-nil if DISPLAY can display images.
@@ -2752,8 +2752,15 @@ frame's display)."
        (fboundp 'image-size)))
 
 (defalias 'display-blink-cursor-p #'display-graphic-p)
-(defalias 'display-multi-frame-p #'display-graphic-p)
-(defalias 'display-multi-font-p #'display-graphic-p)
+(defun display-multi-frame-p (&optional display)
+  "Return non-nil if DISPLAY supports multiple graphical frames."
+  (and (display-graphic-p display)
+       (not (eq (framep-on-display display) 'remote))))
+
+(defun display-multi-font-p (&optional display)
+  "Return non-nil if DISPLAY supports multiple fonts."
+  (and (display-graphic-p display)
+       (not (eq (framep-on-display display) 'remote))))
 
 (defcustom tty-select-active-regions nil
   "If non-nil, update PRIMARY window-system selection on text-mode frames.

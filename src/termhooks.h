@@ -953,6 +953,9 @@ extern struct terminal *terminal_list;
 #elif defined (HAVE_PGTK)
 #define TERMINAL_FONT_CACHE(t)						\
   (t->type == output_pgtk ? t->display_info.pgtk->name_list_element : Qnil)
+#elif defined (HAVE_REMOTE_DISPLAY)
+#define TERMINAL_FONT_CACHE(t) \
+  ((t)->type == output_remote ? (t)->display_info.remote->name_list_element : Qnil)
 #elif defined (HAVE_HAIKU)
 #define TERMINAL_FONT_CACHE(t)						\
   (t->type == output_haiku ? t->display_info.haiku->name_list_element : Qnil)

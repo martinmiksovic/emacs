@@ -1368,7 +1368,7 @@ x_popup_menu_1 (Lisp_Object position, Lisp_Object menu)
 
   unbind_to (specpdl_count, Qnil);
 
-#ifdef HAVE_WINDOW_SYSTEM
+#if defined HAVE_WINDOW_SYSTEM && !defined HAVE_REMOTE_DISPLAY
   /* Hide a previous tip, if any.  */
   if (!FRAME_TERMCAP_P (f))
     Fx_hide_tip ();

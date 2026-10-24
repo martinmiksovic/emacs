@@ -5111,6 +5111,10 @@ void
 gui_set_frame_parameters_1 (struct frame *f, Lisp_Object alist,
 			    bool default_parameter)
 {
+#ifdef HAVE_REMOTE_DISPLAY
+  if (FRAME_REMOTE_P (f))
+    remote_validate_frame_parameters (f, alist);
+#endif
   Lisp_Object tail, frame;
 
   /* Neither of these values should be used.  */

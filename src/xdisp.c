@@ -27812,7 +27812,7 @@ display_menu_bar (struct window *w)
      system that uses the no toolkit menu bar.  Oh well.  At least
      there will be an error, meaning he will correct the ifdef inside
      which `face' is defined.  */
-#if defined HAVE_WINDOW_SYSTEM && !defined HAVE_EXT_MENU_BAR
+#if defined HAVE_WINDOW_SYSTEM && !defined HAVE_EXT_MENU_BAR && !defined HAVE_REMOTE_DISPLAY
   /* Make a 3D menu bar have a shadow at its right end.  */
   extend_face_to_end_of_line (&it);
   if (face->box != FACE_NO_BOX)
@@ -38079,7 +38079,7 @@ expose_frame (struct frame *f, int x, int y, int w, int h)
       |= expose_window (XWINDOW (f->tool_bar_window), &r);
 #endif
 
-#if defined HAVE_WINDOW_SYSTEM && !defined HAVE_EXT_MENU_BAR
+#if defined HAVE_WINDOW_SYSTEM && !defined HAVE_EXT_MENU_BAR && !defined HAVE_REMOTE_DISPLAY
   if (WINDOWP (f->menu_bar_window))
     mouse_face_overwritten_p
       |= expose_window (XWINDOW (f->menu_bar_window), &r);

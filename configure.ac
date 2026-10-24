@@ -4401,7 +4401,7 @@ if test "${with_toolkit_scroll_bars}" != "no"; then
     AC_DEFINE([USE_TOOLKIT_SCROLL_BARS])
     USE_TOOLKIT_SCROLL_BARS=yes
   fi
-elif test "${window_system}" != "x11" && test "${window_system}" != "none"; then
+elif test "${window_system}" != "x11" && test "${window_system}" != "none" && test "${window_system}" != "remote"; then
   AC_MSG_ERROR([Non-toolkit scroll bars are not implemented for your system])
 fi
 
@@ -7563,6 +7563,9 @@ if test "$window_system" != "none"; then
   AC_DEFINE([POLL_FOR_INPUT], [1],
     [Define if you poll periodically to detect C-g.])
   WINDOW_SYSTEM_OBJ="fontset.o fringe.o image.o"
+  if test "$window_system" = remote; then
+    WINDOW_SYSTEM_OBJ="fontset.o fringe.o remoteimage.o"
+  fi
 
   if test "$window_system" = "x11" || test "$REALLY_ANDROID" = "yes"; then
     AC_DEFINE([HAVE_TEXT_CONVERSION], [1],
