@@ -3171,7 +3171,7 @@ if test "$with_remote_display" = yes; then
   AC_DEFINE([HAVE_REMOTE_DISPLAY], [1], [Build the native headless recorder backend.])
   EMACS_CHECK_MODULES([REMOTE_DISPLAY], [freetype2 >= 2.5])
   test "$HAVE_REMOTE_DISPLAY" = yes || AC_MSG_ERROR([remote-display requires FreeType])
-  REMOTE_DISPLAY_OBJ=remoteterm.o
+  REMOTE_DISPLAY_OBJ="remoteterm.o remoterecord.o"
 fi
 AC_SUBST([REMOTE_DISPLAY_OBJ])
 

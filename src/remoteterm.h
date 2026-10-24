@@ -21,7 +21,8 @@ struct remote_display_info {
   unsigned long root_window;
   FILE *record;
   unsigned long events, glyphs;
-  bool record_failed;
+  bool record_failed, record_ready, batch_open, in_update;
+  unsigned long generation, transaction, presentations;
 };
 struct remote_output {
   struct remote_display_info *display_info;

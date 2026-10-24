@@ -7,6 +7,7 @@
 #include FT_FREETYPE_H
 #include "lisp.h"
 #include "remoteterm.h"
+#include "remoterecord.h"
 #include "termhooks.h"
 #include "keyboard.h"
 #include "window.h"
@@ -20,7 +21,6 @@
 #define REMOTE_HASH "a54dca07c76d6289e717e75e0a58c0128f6d7269ef3faf76417c9d7d3bba37ab"
 struct remote_display_info *x_display_list;
 static Lisp_Object remote_display_name;
-static int remote_font_draw (struct glyph_string *, int, int, int, int, bool);
 static struct font_driver remote_font_driver;
 static frame_parm_handler remote_parm_handlers[51]; /* frame.c, this revision. */
 
@@ -30,23 +30,6 @@ struct remote_font {
   FT_Face face;
   unsigned char *bytes;
 };
-
-/* All retained data is owned.  No glyph, face, window or Lisp pointer is
-   written to the recorder.  Failures are sticky, checked outside redisplay. */
-static void remote_record (struct frame *, const char *, ...) ATTRIBUTE_FORMAT_PRINTF (2, 3);
-
-static void
-remote_record (struct frame *f, const char *format, ...)
-{
-  struct remote_display_info *d = FRAME_DISPLAY_INFO (f);
-  if (!d->record || d->record_failed) return;
-  va_list ap;
-  va_start (ap, format);
-  if (vfprintf (d->record, format, ap) < 0 || fputc ('\n', d->record) == EOF)
-    d->record_failed = true;
-  va_end (ap);
-  d->events++;
-}
 
 static Lisp_Object remote_cache (struct frame *f) { return FRAME_DISPLAY_INFO (f)->name_list_element; }
 static Lisp_Object
@@ -185,85 +168,7 @@ remote_new_font (struct frame *f, Lisp_Object obj, int fontset)
   FRAME_LINE_HEIGHT (f) = FRAME_FONT (f)->height;
   return obj;
 }
-static void
-remote_flush (struct frame *f)
-{
-  struct remote_display_info *d = FRAME_DISPLAY_INFO (f);
-  if (d->record && fflush (d->record)) d->record_failed = true;
-}
-static void remote_begin (struct frame *f)
-{ remote_record (f, "{\"event\":\"begin\"}"); }
-static void remote_end (struct frame *f)
-{ remote_record (f, "{\"event\":\"end\"}"); remote_flush (f); }
-static void
-remote_clear_area (struct frame *f, int x, int y, int w, int h)
-{ remote_record (f, "{\"event\":\"clear\",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d}", x,y,w,h); }
-static void remote_clear (struct frame *f)
-{ remote_clear_area (f, 0, 0, FRAME_PIXEL_WIDTH (f), FRAME_PIXEL_HEIGHT (f)); }
-static void remote_border (struct frame *f) {}
-static void
-remote_draw (struct glyph_string *s)
-{
-  if (s->first_glyph->type != CHAR_GLYPH || s->font_not_found_p)
-    {
-      remote_record (s->f, "{\"event\":\"unsupported\",\"glyph_type\":%d,\"missing_font\":%s,\"x\":%d,\"y\":%d,\"width\":%d}",
-                     s->first_glyph->type, s->font_not_found_p ? "true" : "false", s->x, s->y, s->width);
-      return;
-    }
-  for (int i = 0; i < s->nchars; ++i)
-    if (s->first_glyph[i].u.ch > 255 || s->first_glyph[i].resolved_level)
-      {
-        remote_record (s->f, "{\"event\":\"unsupported-text\",\"character\":%u,\"bidi_level\":%u}",
-                       s->first_glyph[i].u.ch, (unsigned) s->first_glyph[i].resolved_level);
-        return;
-      }
-  if (s->face->underline || s->face->overline_p || s->face->strike_through_p
-      || s->face->box != FACE_NO_BOX || s->stippled_p)
-    remote_record (s->f, "{\"event\":\"unsupported-face-decoration\"}");
-  NativeRectangle clips[2];
-  int n = get_glyph_string_clip_rects (s, clips, 2);
-  int x = s->x;
-  remote_record (s->f, "{\"event\":\"run\",\"x\":%d,\"y\":%d,\"width\":%d,\"background_width\":%d,\"height\":%d,\"foreground\":%lu,\"background\":%lu,\"clip_count\":%d}",
-                 x,s->y,s->width,s->background_width,s->height,s->face->foreground,s->face->background,n);
-  for (int i=0; i<n; i++)
-    remote_record (s->f, "{\"event\":\"clip\",\"x\":%d,\"y\":%d,\"width\":%u,\"height\":%u}",
-                   clips[i].x, clips[i].y, clips[i].width, clips[i].height);
-  remote_font_draw (s,0,s->nchars,x,s->ybase,true);
-}
-static int
-remote_font_draw (struct glyph_string *s, int from, int to, int x, int y,
-                  bool background)
-{
-  struct remote_display_info *d = FRAME_DISPLAY_INFO (s->f);
-  for (int i = from; i < to; i++)
-    {
-      struct glyph *g = s->first_glyph + i;
-      remote_record (s->f, "{\"event\":\"glyph\",\"font\":1,\"glyph_id\":%u,\"character\":%u,\"x\":%d,\"baseline\":%d,\"advance\":%d,\"x_1024\":%lld,\"baseline_1024\":%lld,\"advance_1024\":%lld}",
-                     s->char2b[i], g->u.ch, x,y,g->pixel_width,
-                     (long long)x*1024,(long long)y*1024,(long long)g->pixel_width*1024);
-      x += g->pixel_width;
-      d->glyphs++;
-    }
-  return to-from;
-}
-
-static void remote_scroll (struct window *w, struct run *r)
-{ remote_record (XFRAME (WINDOW_FRAME (w)), "{\"event\":\"scroll\",\"from\":%d,\"to\":%d,\"height\":%d}", r->current_y,r->desired_y,r->height); }
 static void remote_pointer (struct frame *f, Emacs_Cursor c) {}
-static void
-remote_cursor (struct window *w, struct glyph_row *row, int x, int y,
-               enum text_cursor_kinds type, int width, bool on, bool active)
-{
-  w->phys_cursor_type = type;
-  w->phys_cursor_on_p = on;
-  remote_record (XFRAME (WINDOW_FRAME (w)), "{\"event\":\"cursor\",\"x\":%d,\"y\":%d,\"type\":%d,\"width\":%d,\"on\":%s}", x,y,type,width,on?"true":"false");
-}
-static void remote_vertical (struct window *w, int x, int y0, int y1)
-{ remote_record (XFRAME (WINDOW_FRAME (w)), "{\"event\":\"border\",\"x\":%d,\"y0\":%d,\"y1\":%d}", x,y0,y1); }
-static void remote_divider (struct window *w,int x0,int x1,int y0,int y1)
-{ remote_record (XFRAME (WINDOW_FRAME (w)), "{\"event\":\"divider\",\"x0\":%d,\"x1\":%d,\"y0\":%d,\"y1\":%d}",x0,x1,y0,y1); }
-static void remote_fringe (struct window *w, struct glyph_row *row, struct draw_fringe_bitmap_params *p)
-{ remote_record (XFRAME (WINDOW_FRAME (w)), "{\"event\":\"unsupported-fringe\"}"); }
 static void remote_fringe_define (int n, unsigned short *bits, int h, int w) {}
 static void remote_fringe_destroy (int n) {}
 static void remote_after_line (struct window *w, struct glyph_row *r) {}
@@ -293,7 +198,7 @@ static struct redisplay_interface remote_redisplay = {
 static void
 remote_delete_frame (struct frame *f)
 {
-  remote_record (f, "{\"event\":\"delete-frame\"}");
+  remote_record_delete (f);
   free_frame_faces (f);
   xfree (FRAME_OUTPUT_DATA (f));
   FRAME_OUTPUT_DATA (f) = NULL;
@@ -334,7 +239,7 @@ static void remote_name (struct frame *f,Lisp_Object n,Lisp_Object old) {}
 static void remote_size (struct frame *f, bool gravity,int w,int h)
 {
   change_frame_size (f,w,h,false,false,false);
-  remote_record (f,"{\"event\":\"resize\",\"width\":%d,\"height\":%d}",w,h);
+  remote_record_resize (f);
 }
 static void remote_offset (struct frame *f, int x, int y, int gravity)
 { error ("Remote recorder has no desktop position"); }
@@ -439,9 +344,7 @@ This experimental frame has no external input source.  */)
   t->reference_count++;
   Vframe_list = Fcons (frame,Vframe_list);
   SET_FRAME_VISIBLE (f,true); SET_FRAME_GARBAGED (f);
-  remote_record (f,"{\"event\":\"create-frame\",\"units\":1024,\"font\":1,\"font_sha256\":\"" REMOTE_HASH "\",\"size\":16,\"ascent\":%d,\"descent\":%d,\"column_width\":%d,\"line_height\":%d,\"width\":%d,\"height\":%d}",
-                 FRAME_FONT(f)->ascent,FRAME_FONT(f)->descent,FRAME_COLUMN_WIDTH(f),FRAME_LINE_HEIGHT(f),FRAME_PIXEL_WIDTH(f),FRAME_PIXEL_HEIGHT(f));
-  remote_flush (f);
+  remote_record_create (f);
   return unbind_to (count,frame);
 }
 DEFUN ("remote-recorder-status", Fremote_recorder_status, Sremote_recorder_status, 1, 1, 0,
@@ -454,6 +357,18 @@ DEFUN ("remote-recorder-status", Fremote_recorder_status, Sremote_recorder_statu
   struct remote_display_info *d = FRAME_DISPLAY_INFO(f);
   Lisp_Object values[] = {make_fixnum(d->events), make_fixnum(d->glyphs), d->record_failed?Qt:Qnil};
   return Fvector (3,values);
+}
+DEFUN ("remote-recorder-checkpoint", Fremote_recorder_checkpoint,
+       Sremote_recorder_checkpoint, 1, 1, 0,
+       doc: /* Invalidate the recording font epoch and request a full redraw.
+Call `redisplay' afterwards.  This does not create a second layout engine.  */)
+  (Lisp_Object frame)
+{
+  struct frame *f = decode_live_frame (frame);
+  if (!FRAME_REMOTE_P (f)) error ("Not a remote frame");
+  remote_record_invalidate (f);
+  Fredraw_frame (frame);
+  return Qnil;
 }
 DEFUN ("xw-display-color-p", Fxw_display_color_p, Sxw_display_color_p, 0, 1, 0,
        doc: /* Whether TERMINAL is a remote RGB recorder.  */)
@@ -490,5 +405,6 @@ syms_of_remote (void)
   pdumper_do_now_and_after_load (remote_init_runtime);
   defsubr (&Sxw_display_color_p); defsubr (&Sx_display_grayscale_p);
   defsubr (&Sremote_create_frame); defsubr (&Sremote_recorder_status);
+  defsubr (&Sremote_recorder_checkpoint);
   Fprovide (intern_c_string ("remote-display"),Qnil);
 }
