@@ -255,6 +255,11 @@ void remote_cursor (struct window *w,struct glyph_row *row,int x,int y,
   w->phys_cursor_type=on?type:NO_CURSOR; w->phys_cursor_on_p=on;
   struct glyph *g=get_phys_cursor_glyph(w);
   if(!g) return;
+  /* A tab/stretch has no ink.  Restore its real background first, then
+     paint only the cursor rectangle chosen by get_phys_cursor_geometry.
+     DRAW_CURSOR on the entire stretch would incorrectly fill the tab. */
+  if(on && type==FILLED_BOX_CURSOR && g->type==STRETCH_GLYPH)
+    draw_phys_cursor_glyph(w,row,DRAW_NORMAL_TEXT);
   int h; get_phys_cursor_geometry(w,row,g,&x,&y,&h);
   int wd=w->phys_cursor_width;
   if(type==BAR_CURSOR) wd=min(wd,width<0?1:width);
@@ -262,9 +267,11 @@ void remote_cursor (struct window *w,struct glyph_row *row,int x,int y,
   if(type==BAR_CURSOR) w->phys_cursor_width=wd;
   if(type==HBAR_CURSOR) w->phys_cursor_height=h;
   int bx,by,bw,bh; window_box(w,TEXT_AREA,&bx,&by,&bw,&bh);
+  struct face *face=FACE_FROM_ID_OR_NULL(f,g->face_id);
+  unsigned long color=face && face->background==0 ? face->foreground : 0;
   batch(f); start(f,"cursor"); part(f,",\"on\":%s,\"kind\":\"%s\",\"rect\":",on?"true":"false",cursor_kind(type));
-  rect(f,x,y,wd,h); part(f,",\"clip\":"); rect(f,bx,by,bw,bh); part(f,",\"color\":0"); finish(f);
-  if(on && type==FILLED_BOX_CURSOR) draw_phys_cursor_glyph(w,row,DRAW_CURSOR);
+  rect(f,x,y,wd,h); part(f,",\"clip\":"); rect(f,bx,by,bw,bh); part(f,",\"color\":%lu",color); finish(f);
+  if(on && type==FILLED_BOX_CURSOR && g->type!=STRETCH_GLYPH) draw_phys_cursor_glyph(w,row,DRAW_CURSOR);
 }
 void remote_vertical (struct window *w,int x,int y0,int y1)
 {
