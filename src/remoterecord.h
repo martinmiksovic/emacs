@@ -1,6 +1,7 @@
 /* Private recorder API; no transport or layout implementation. */
 #ifndef EMACS_REMOTERECORD_H
 #define EMACS_REMOTERECORD_H
+extern void remote_record_bootstrap (struct frame *);
 extern void remote_record_create (struct frame *);
 extern void remote_record_delete (struct frame *);
 extern void remote_record_resize (struct frame *);

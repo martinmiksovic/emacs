@@ -9,6 +9,9 @@ struct remote_display_info {
   struct remote_display_info *next;
   struct terminal *terminal;
   struct remote_input *input;
+  struct remote_stream *stream;
+  unsigned scale;
+  bool snapshot_only;
   void *rdb;
   unsigned grabbed;
   struct frame *last_mouse_frame, *last_mouse_motion_frame;

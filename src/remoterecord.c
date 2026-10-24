@@ -6,6 +6,7 @@
 #include "lisp.h"
 #include "remoteterm.h"
 #include "remoterecord.h"
+#include "remotestream.h"
 #include "window.h"
 #include "buffer.h"
 #include "blockinput.h"
@@ -18,16 +19,33 @@ static void
 part (struct frame *f, const char *format, ...)
 {
   struct remote_display_info *d = FRAME_DISPLAY_INFO (f);
-  if (!d->record_ready || d->record_failed) return;
+  if (!d->record_ready) return;
   va_list ap;
   va_start (ap, format);
-  if (vfprintf (d->record, format, ap) < 0) d->record_failed = true;
+  if (d->record && !d->record_failed && !d->snapshot_only)
+    {
+      va_list file_ap;
+      va_copy (file_ap, ap);
+      if (vfprintf (d->record, format, file_ap) < 0) d->record_failed = true;
+      va_end (file_ap);
+    }
+  remote_stream_part (d, format, ap);
   va_end (ap);
 }
 static void start (struct frame *f, const char *event)
-{ part (f, "{\"seq\":%lu,\"event\":\"%s\"", FRAME_DISPLAY_INFO(f)->events, event); }
+{
+  struct remote_display_info *d = FRAME_DISPLAY_INFO (f);
+  if (d->record && !d->record_failed && !d->snapshot_only
+      && fprintf (d->record, "{\"seq\":%lu,\"event\":\"%s\"", d->events, event) < 0)
+    d->record_failed = true;
+  remote_stream_start (d, event);
+}
 static void finish (struct frame *f)
-{ part (f, "}\n"); FRAME_DISPLAY_INFO(f)->events++; }
+{
+  part (f, "}\n");
+  remote_stream_finish (FRAME_DISPLAY_INFO (f));
+  if (!FRAME_DISPLAY_INFO (f)->snapshot_only) FRAME_DISPLAY_INFO (f)->events++;
+}
 static void rect (struct frame *f, int x, int y, int w, int h)
 { part (f, "[%lld,%lld,%lld,%lld]", U(x), U(y), U(w), U(h)); }
 static void batch (struct frame *f)
@@ -106,16 +124,20 @@ static void font_resource (struct frame *f)
        FRAME_DISPLAY_INFO(f)->generation);
   finish(f);
 }
+void remote_record_bootstrap (struct frame *f)
+{
+  start(f,"header"); part(f,",\"protocol\":\"remote-emacs-display\",\"version\":1,\"units\":1024"); finish(f);
+  font_resource(f);
+  start(f,"create-frame");
+  part(f,",\"id\":1,\"width\":%lld,\"height\":%lld,\"scale\":%u,\"background\":%lu",
+       U(FRAME_PIXEL_WIDTH(f)),U(FRAME_PIXEL_HEIGHT(f)),FRAME_DISPLAY_INFO(f)->scale,FRAME_BACKGROUND_PIXEL(f)); finish(f);
+  remote_flush(f);
+}
 void remote_record_create (struct frame *f)
 {
   struct remote_display_info *d=FRAME_DISPLAY_INFO(f);
   d->record_ready=true; d->generation=1;
-  start(f,"header"); part(f,",\"protocol\":\"remote-emacs-display\",\"version\":1,\"units\":1024"); finish(f);
-  font_resource(f);
-  start(f,"create-frame");
-  part(f,",\"id\":1,\"width\":%lld,\"height\":%lld,\"scale\":1,\"background\":%lu",
-       U(FRAME_PIXEL_WIDTH(f)),U(FRAME_PIXEL_HEIGHT(f)),FRAME_BACKGROUND_PIXEL(f)); finish(f);
-  remote_flush(f);
+  remote_record_bootstrap(f);
 }
 void remote_record_delete (struct frame *f)
 {
@@ -136,16 +158,16 @@ void remote_record_invalidate (struct frame *f)
 void remote_clear (struct frame *f)
 {
   batch(f); start(f,"reset");
-  part(f,",\"width\":%lld,\"height\":%lld,\"scale\":1,\"background\":%lu",
-       U(FRAME_PIXEL_WIDTH(f)),U(FRAME_PIXEL_HEIGHT(f)),FRAME_BACKGROUND_PIXEL(f)); finish(f);
+  part(f,",\"width\":%lld,\"height\":%lld,\"scale\":%u,\"background\":%lu",
+       U(FRAME_PIXEL_WIDTH(f)),U(FRAME_PIXEL_HEIGHT(f)),FRAME_DISPLAY_INFO(f)->scale,FRAME_BACKGROUND_PIXEL(f)); finish(f);
 }
 void remote_record_resize (struct frame *f)
 {
   if (!FRAME_DISPLAY_INFO(f)->record_ready) return;
   /* Resize discards the old raster.  Emacs regenerates its glyph matrices. */
   batch(f); start(f,"resize");
-  part(f,",\"width\":%lld,\"height\":%lld,\"scale\":1,\"background\":%lu",
-       U(FRAME_PIXEL_WIDTH(f)),U(FRAME_PIXEL_HEIGHT(f)),FRAME_BACKGROUND_PIXEL(f)); finish(f);
+  part(f,",\"width\":%lld,\"height\":%lld,\"scale\":%u,\"background\":%lu",
+       U(FRAME_PIXEL_WIDTH(f)),U(FRAME_PIXEL_HEIGHT(f)),FRAME_DISPLAY_INFO(f)->scale,FRAME_BACKGROUND_PIXEL(f)); finish(f);
   SET_FRAME_GARBAGED(f);
 }
 static void fill (struct frame *f, int x,int y,int w,int h,unsigned long color)

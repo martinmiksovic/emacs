@@ -9,6 +9,7 @@
 #include "remoteterm.h"
 #include "remoterecord.h"
 #include "remoteinput.h"
+#include "remotestream.h"
 #include "termhooks.h"
 #include "keyboard.h"
 #include "window.h"
@@ -200,6 +201,7 @@ static void
 remote_delete_frame (struct frame *f)
 {
   remote_input_close (FRAME_DISPLAY_INFO (f));
+  remote_stream_close (FRAME_DISPLAY_INFO (f));
   remote_record_delete (f);
   free_frame_faces (f);
   xfree (FRAME_OUTPUT_DATA (f));
@@ -280,21 +282,23 @@ DEFUN ("remote-create-frame", Fremote_create_frame, Sremote_create_frame, 1, 1, 
        doc: /* Create a native headless recorder frame, writing JSON lines to FILE.
 Only one remote frame may exist.  Requires the pinned DejaVu Sans Mono font.
 Use `delete-frame' or `delete-terminal' for normal lifecycle cleanup.
-This experimental frame has no external input source.  */)
+FILE may be nil to disable diagnostic disk writes.  Use the separate
+`remote-input-listen' and `remote-display-listen' endpoints to attach a client.  */)
   (Lisp_Object file)
 {
-  CHECK_STRING (file);
+  if (!NILP (file)) CHECK_STRING (file);
   if (x_display_list) error ("Only one remote recorder frame is supported");
-  file = Fexpand_file_name (file,Qnil);
+  if (!NILP (file)) file = Fexpand_file_name (file,Qnil);
   /* Preflight before constructing a frame; never abort inside face setup
      because the resource was absent or mismatched. */
   struct remote_font probe = {0};
   bool valid = remote_load_font (&probe);
   remote_close_font (&probe.font);
   if (!valid) error ("Remote font missing or SHA-256 mismatch: " REMOTE_FONT);
-  FILE *out = fopen (SSDATA (file), "wx");
-  if (!out) report_file_error ("Creating remote recorder",file);
+  FILE *out = NILP (file) ? NULL : fopen (SSDATA (file), "wx");
+  if (!NILP (file) && !out) report_file_error ("Creating remote recorder",file);
   struct remote_display_info *d = xzalloc (sizeof *d);
+  d->scale = 1;
   d->record = out; d->resx = d->resy = 96; d->n_planes = 24;
   d->smallest_char_width = 10; d->smallest_font_height = 19;
   reset_mouse_highlight (&d->mouse_highlight);
@@ -408,6 +412,7 @@ void
 syms_of_remote (void)
 {
   syms_of_remote_input ();
+  syms_of_remote_stream ();
   DEFSYM (Qremote,"remote");
   remote_display_name = Qnil; staticpro (&remote_display_name);
   pdumper_do_now_and_after_load (remote_init_runtime);
