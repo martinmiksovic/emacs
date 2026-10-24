@@ -8,6 +8,7 @@
 #include "lisp.h"
 #include "remoteterm.h"
 #include "remoterecord.h"
+#include "remoteinput.h"
 #include "termhooks.h"
 #include "keyboard.h"
 #include "window.h"
@@ -198,6 +199,7 @@ static struct redisplay_interface remote_redisplay = {
 static void
 remote_delete_frame (struct frame *f)
 {
+  remote_input_close (FRAME_DISPLAY_INFO (f));
   remote_record_delete (f);
   free_frame_faces (f);
   xfree (FRAME_OUTPUT_DATA (f));
@@ -232,7 +234,11 @@ remote_unwind_frame (Lisp_Object obj)
 static void remote_visibility (struct frame *f, bool visible)
 { SET_FRAME_VISIBLE (f, visible); if (visible) SET_FRAME_GARBAGED (f); }
 static Lisp_Object remote_focus (struct frame *f)
-{ return Qnil; /* No input source and thus no external focus. */ }
+{
+  Lisp_Object frame = Qnil;
+  if (FRAME_DISPLAY_INFO (f)->highlight_frame) XSETFRAME (frame, f);
+  return frame;
+}
 static const char *remote_resource (void *db, const char *key, const char *cl)
 { return NULL; }
 static void remote_name (struct frame *f,Lisp_Object n,Lisp_Object old) {}
@@ -296,6 +302,7 @@ This experimental frame has no external input source.  */)
   t->name = xstrdup ("remote-recorder"); t->display_info.remote = d;
   d->terminal = t;
   t->kboard = allocate_kboard (Qremote); t->kboard->reference_count++;
+  t->read_socket_hook = remote_read_socket;
   t->delete_frame_hook = remote_delete_frame;
   t->delete_terminal_hook = remote_delete_terminal;
   t->set_new_font_hook = remote_new_font; t->defined_color_hook = remote_color;
@@ -400,6 +407,7 @@ remote_init_runtime (void)
 void
 syms_of_remote (void)
 {
+  syms_of_remote_input ();
   DEFSYM (Qremote,"remote");
   remote_display_name = Qnil; staticpro (&remote_display_name);
   pdumper_do_now_and_after_load (remote_init_runtime);
