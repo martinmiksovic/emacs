@@ -2614,6 +2614,9 @@ AC_SUBST([AUTO_DEPEND])
 ## set window_system to an appropriate value and add objects to
 ## window-system-specific substs.
 
+AC_ARG_WITH([remote-display],
+  [AS_HELP_STRING([--with-remote-display], [build the experimental headless recorder backend])])
+
 window_system=none
 
 ANDROID_OBJ=
@@ -3161,6 +3164,17 @@ AC_SUBST([HAIKU_OBJ])
 AC_SUBST([HAIKU_CXX_OBJ])
 AC_SUBST([HAIKU_CFLAGS])
 
+REMOTE_DISPLAY_OBJ=
+if test "$with_remote_display" = yes; then
+  test "$window_system" = none || AC_MSG_ERROR([remote-display requires --without-x and no other GUI])
+  window_system=remote
+  AC_DEFINE([HAVE_REMOTE_DISPLAY], [1], [Build the native headless recorder backend.])
+  EMACS_CHECK_MODULES([REMOTE_DISPLAY], [freetype2 >= 2.5])
+  test "$HAVE_REMOTE_DISPLAY" = yes || AC_MSG_ERROR([remote-display requires FreeType])
+  REMOTE_DISPLAY_OBJ=remoteterm.o
+fi
+AC_SUBST([REMOTE_DISPLAY_OBJ])
+
 ## $window_system is now set to the window system we will
 ## ultimately use.
 
@@ -3171,6 +3185,7 @@ USE_X_TOOLKIT=none
 HAVE_PGTK=no
 
 case "${window_system}" in
+  remote ) term_header=remoteterm.h ;;
   x11 )
     HAVE_X_WINDOWS=yes
     HAVE_X11=yes

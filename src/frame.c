@@ -318,6 +318,8 @@ See also `frame-live-p'.  */)
       return Qhaiku;
     case output_android:
       return Qandroid;
+    case output_remote:
+      return intern_c_string ("remote");
     default:
       emacs_abort ();
     }

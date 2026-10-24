@@ -65,6 +65,7 @@ enum output_method
   output_pgtk,
   output_haiku,
   output_android,
+  output_remote,
 };
 
 /* Input queue declarations and hooks.  */
@@ -539,6 +540,7 @@ struct terminal
     struct ns_display_info *ns;			/* nsterm.h */
     struct pgtk_display_info *pgtk;		/* pgtkterm.h */
     struct haiku_display_info *haiku;		/* haikuterm.h */
+    struct remote_display_info *remote;
     struct android_display_info *android;	/* androidterm.h */
   } display_info;
 

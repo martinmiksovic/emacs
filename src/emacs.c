@@ -2361,6 +2361,10 @@ Using an Emacs configured with --with-x-toolkit=lucid does not have this problem
       syms_of_xdisp ();
       syms_of_sqlite ();
       syms_of_font ();
+#ifdef HAVE_REMOTE_DISPLAY
+      syms_of_remote ();
+      syms_of_fontset ();
+#endif
 #ifdef HAVE_WINDOW_SYSTEM
       syms_of_fringe ();
       syms_of_image ();

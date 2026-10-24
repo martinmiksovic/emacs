@@ -156,6 +156,11 @@ typedef Emacs_Pixmap XImagePtr;
 typedef XImagePtr XImagePtr_or_DC;
 #endif /* HAVE_PGTK */
 
+#ifdef HAVE_REMOTE_DISPLAY
+#include "remotegui.h"
+typedef struct remote_display_info Display_Info;
+#endif
+
 #ifdef HAVE_HAIKU
 #include "haikugui.h"
 typedef struct haiku_display_info Display_Info;
