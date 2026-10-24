@@ -21,7 +21,7 @@ struct remote_stream
 {
   struct frame *frame;             /* Owned by this frame's display context. */
   int listener, peer;
-  bool active;
+  bool active, busy, completed;
   unsigned used, line_used;
   unsigned char control[CONTROL_SIZE];
   char *queue, *line;
@@ -59,7 +59,7 @@ queue_bytes (struct remote_display_info *d, const char *bytes, size_t n)
   memcpy (s->queue + tail, bytes, first);
   memcpy (s->queue, bytes + first, n - first);
   s->queued += n;
-  add_write_fd (s->peer, stream_io, d);
+  if (!s->busy) add_write_fd (s->peer, stream_io, d);
 }
 static void
 queue_record (struct remote_display_info *d, const char *bytes, size_t n)
@@ -100,6 +100,27 @@ static uint32_t
 word (const unsigned char *p)
 { return (uint32_t) p[0] << 24 | (uint32_t) p[1] << 16 | (uint32_t) p[2] << 8 | p[3]; }
 
+/* Redisplay and resize can evaluate Lisp, including frame deletion and nested
+   process waits.  Keep the frame GC-visible on the unwind stack, suspend this
+   peer's readiness, and reacquire transport ownership afterwards.  Never keep
+   using a borrowed display/stream pointer across those calls. */
+static void
+stream_restore (Lisp_Object frame)
+{
+  struct frame *f = XFRAME (frame);
+  if (!FRAME_LIVE_P (f)) return;
+  struct remote_display_info *d = FRAME_DISPLAY_INFO (f);
+  struct remote_stream *s = d->stream;
+  if (!s) return;
+  s->busy = false;
+  if (!s->completed) stream_disconnect (s);
+  if (s->peer >= 0)
+    {
+      add_non_keyboard_read_fd (s->peer, stream_io, d);
+      if (s->queued) add_write_fd (s->peer, stream_io, d);
+    }
+}
+
 /* Ordinary process readiness callback; never called by the SIGIO reader.
    Bounded control reads, one resize per callback, bounded nonblocking writes. */
 static void
@@ -132,11 +153,22 @@ stream_io (int fd, void *data)
     {
       Lisp_Object frame;
       XSETFRAME (frame, s->frame);
+      specpdl_ref unwind = SPECPDL_INDEX ();
+      record_unwind_protect (stream_restore, frame);
+      s->busy = true; s->completed = false;
+      delete_write_fd (fd);
+      delete_read_fd (fd);
       /* Finish the old transaction before changing the geometry or introducing
          the snapshot.  The wire's counters start at zero on every attachment. */
       remote_end (s->frame);
       d->scale = scale;
       Fset_frame_size (frame, make_fixnum (width), make_fixnum (height), Qt);
+      if (!FRAME_LIVE_P (XFRAME (frame)))
+        { unbind_to (unwind, Qnil); return; }
+      d = FRAME_DISPLAY_INFO (XFRAME (frame));
+      s = d->stream;
+      if (!s || s->peer < 0)
+        { unbind_to (unwind, Qnil); return; }
       remote_end (s->frame);
       if (hello)
         {
@@ -154,6 +186,13 @@ stream_io (int fd, void *data)
       Fredraw_frame (frame);
       /* Normal redisplay owns glyph generation and the presentation boundary. */
       Fredisplay (Qt);
+      if (FRAME_LIVE_P (XFRAME (frame)))
+        {
+          d = FRAME_DISPLAY_INFO (XFRAME (frame));
+          if (d->stream) d->stream->completed = true;
+        }
+      unbind_to (unwind, Qnil);
+      return;
     }
   if (s->peer < 0) return;
   if (s->queued)
