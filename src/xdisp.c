@@ -28064,7 +28064,16 @@ display_mode_lines (struct window *w)
 	 can reasonably tell whether a mouse click will select w.  */
       XSETWINDOW (window, w);
       if (FUNCTIONP (default_help))
-	wset_mode_line_help_echo (w, dsafe_call1 (default_help, window));
+        {
+          Lisp_Object help = dsafe_call1 (default_help, window);
+          /* Like a mode-line :eval form, help Lisp can delete the frame or
+             window.  Abort this redisplay before selecting a dead window or
+             accessing its freed matrices, faces or terminal.  */
+          if (!FRAME_LIVE_P (XFRAME (new_frame)) || !WINDOW_LIVE_P (window))
+            signal_error ("Mode line help deleted the window being displayed",
+                          window);
+          wset_mode_line_help_echo (w, help);
+        }
       else if (STRINGP (default_help))
 	wset_mode_line_help_echo (w, default_help);
       else
