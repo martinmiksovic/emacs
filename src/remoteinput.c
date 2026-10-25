@@ -16,14 +16,17 @@
 #include "blockinput.h"
 #include "remoteinput.h"
 
-/* Four-byte big-endian length, then version, kind, modifiers, reserved,
-   and a four-byte Unicode scalar or stable symbolic key ID. */
-enum { REMOTE_PACKET_SIZE = 12, REMOTE_READ_BUDGET = 64 };
+/* Four-byte big-endian body length.  V1 keys have an eight-byte body;
+   v2 pointer events have a 24-byte body.  No native structures on the wire. */
+enum { REMOTE_PACKET_SIZE = 28, REMOTE_READ_BUDGET = 64 };
 struct remote_input
 {
   struct frame *frame;             /* Owned by the enclosing live frame. */
   int listener, peer;
-  unsigned used;
+  unsigned used, buttons;
+  bool yield, position_valid;
+  int x, y;
+  Time time;
   unsigned char packet[REMOTE_PACKET_SIZE];
   char path[sizeof ((struct sockaddr_un *) 0)->sun_path];
   dev_t device;
@@ -48,9 +51,78 @@ remote_disconnect (struct remote_display_info *d)
       in->peer = -1;
       remote_count (&in->disconnected);
     }
-  in->used = 0;
+  in->used = in->buttons = 0;
+  in->yield = in->position_valid = false;
   d->highlight_frame = NULL;
   SET_FRAME_GARBAGED (in->frame);
+}
+
+static uint32_t
+remote_u32 (const unsigned char *p)
+{
+  return ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16)
+    | ((uint32_t) p[2] << 8) | p[3];
+}
+
+/* Decode two's complement without an implementation-defined unsigned-to-signed
+   conversion.  Floor fixed-point coordinates, including negative drag positions. */
+static int64_t
+remote_coordinate (const unsigned char *p)
+{
+  uint32_t u = remote_u32 (p);
+  return u <= INT32_MAX ? u : (int64_t) u - (INT64_C (1) << 32);
+}
+
+static bool
+remote_pointer (struct remote_input *in, const unsigned char *p,
+                struct input_event *event, unsigned *count)
+{
+  int64_t x = remote_coordinate (p + 12), y = remote_coordinate (p + 16);
+  unsigned amount = ((unsigned) p[6] << 8) | p[7];
+  unsigned button = p[4];
+  if (p[0] != 2 || (p[2] & ~7) || (p[3] & ~7) || p[5]
+      || remote_u32 (p + 20) || x < -33554432 || x > 33554432
+      || y < -33554432 || y > 33554432)
+    return false;
+  event->modifiers = (p[2] & 1 ? ctrl_modifier : 0)
+    | (p[2] & 2 ? meta_modifier : 0) | (p[2] & 4 ? shift_modifier : 0);
+  switch (p[1])
+    {
+    case 3:                         /* Motion, including held-button motion. */
+      if (button || amount || p[3] != in->buttons) return false;
+      event->kind = MOUSE_MOTION_EVENT;
+      event->code = p[3];
+      break;
+    case 4:                         /* Down; mask describes the new state. */
+    case 5:                         /* Up. */
+      if (button < 1 || button > 3 || amount) return false;
+      unsigned bit = 1u << (button - 1);
+      if ((p[1] == 4 && (in->buttons & bit))
+          || (p[1] == 5 && !(in->buttons & bit))
+          || p[3] != (in->buttons ^ bit)) return false;
+      event->kind = MOUSE_CLICK_EVENT;
+      event->code = button - 1;
+      event->modifiers |= p[1] == 4 ? down_modifier : up_modifier;
+      break;
+    case 6:                         /* Discrete wheel detents. */
+      if (button < 1 || button > 4 || !amount || amount > 8
+          || p[3] != in->buttons) return false;
+      event->kind = button <= 2 ? WHEEL_EVENT : HORIZ_WHEEL_EVENT;
+      event->modifiers |= button & 1 ? up_modifier : down_modifier;
+      *count = amount;
+      break;
+    default:
+      return false;
+    }
+  in->buttons = p[3];
+  in->x = (x - (x < 0 ? 1023 : 0)) / 1024;
+  in->y = (y - (y < 0 ? 1023 : 0)) / 1024;
+  in->time = remote_u32 (p + 8);
+  in->position_valid = true;
+  event->x = make_fixnum (in->x);
+  event->y = make_fixnum (in->y);
+  event->timestamp = in->time;
+  return true;
 }
 
 /* This hook can run from SIGIO.  No allocation, Lisp evaluation or stdio.
@@ -61,14 +133,16 @@ remote_read_socket (struct terminal *t, struct input_event *hold_quit)
   struct remote_display_info *d = t->display_info.remote;
   struct remote_input *in = d->input;
   if (!in || in->peer < 0 || kbd_on_hold_p ()) return 0;
+  /* gobble_input repeatedly drains a positive-returning terminal before moving
+     to the next.  Yield once after each bounded batch, even under a flood. */
+  if (in->yield) { in->yield = false; return 0; }
   int events = 0;
   for (int work = 0; work < REMOTE_READ_BUDGET && !kbd_on_hold_p (); ++work)
     {
-      unsigned target = in->used < 4 ? 4 : REMOTE_PACKET_SIZE;
+      unsigned target = in->used < 4 ? 4 : 4 + remote_u32 (in->packet);
       ssize_t n = recv (in->peer, in->packet + in->used, target - in->used,
                         MSG_DONTWAIT);
-      if (n < 0 && (errno == EAGAIN || errno == EINTR))
-        break;
+      if (n < 0 && (errno == EAGAIN || errno == EINTR)) break;
       if (n <= 0)
         {
           if (in->used) remote_count (&in->rejected);
@@ -76,51 +150,54 @@ remote_read_socket (struct terminal *t, struct input_event *hold_quit)
           break;
         }
       in->used += n;
-      if (in->used >= 4 && (in->packet[0] || in->packet[1]
-                           || in->packet[2] || in->packet[3] != 8))
-        goto malformed;
-      if (in->used < REMOTE_PACKET_SIZE) continue;
+      unsigned length = in->used >= 4 ? remote_u32 (in->packet) : 0;
+      if (in->used >= 4 && length != 8 && length != 24) goto malformed;
+      if (in->used < length + 4) continue;
       const unsigned char *p = in->packet + 4;
-      uint32_t code = ((uint32_t) p[4] << 24) | ((uint32_t) p[5] << 16)
-        | ((uint32_t) p[6] << 8) | p[7];
-      if (p[0] != 1 || p[3] || (p[2] & ~3)) goto malformed;
       struct input_event event;
       EVENT_INIT (event);
-      event.modifiers = (p[2] & 1 ? ctrl_modifier : 0)
-        | (p[2] & 2 ? meta_modifier : 0);
       XSETFRAME (event.frame_or_window, in->frame);
-      if (p[1] == 1)
+      unsigned count = 1;
+      if (length == 24)
         {
-          /* Text is a printable Unicode scalar.  Control keys are modifiers
-             on printable characters; return/tab/DEL are symbolic keys. */
-          if (code < 32 || (code >= 127 && code <= 159) || code > 0x10ffff
-              || (code >= 0xd800 && code <= 0xdfff)) goto malformed;
-          event.kind = code < 128 ? ASCII_KEYSTROKE_EVENT
-            : MULTIBYTE_CHAR_KEYSTROKE_EVENT;
-          event.code = code;
+          if (!remote_pointer (in, p, &event, &count)) goto malformed;
         }
-      else if (p[1] == 2)
+      else
         {
-          /* Values index keyboard.c's existing lispy_function_keys table.
-             These are not exposed as platform keysyms on the wire. */
-          static const unsigned keys[] = {
-            0, 0xff0d, 0xff09, 0xff08, 0xffff, 0xff1b,
-            0xff51, 0xff53, 0xff52, 0xff54, 0xff50, 0xff57,
-            0xff55, 0xff56, 0xff63,
-            0xffbe, 0xffbf, 0xffc0, 0xffc1, 0xffc2, 0xffc3,
-            0xffc4, 0xffc5, 0xffc6, 0xffc7, 0xffc8, 0xffc9
-          };
-          if (!code || code >= ARRAYELTS (keys)) goto malformed;
-          event.kind = NON_ASCII_KEYSTROKE_EVENT;
-          event.code = keys[code];
+          uint32_t code = remote_u32 (p + 4);
+          if (p[0] != 1 || p[3] || (p[2] & ~3)) goto malformed;
+          event.modifiers = (p[2] & 1 ? ctrl_modifier : 0)
+            | (p[2] & 2 ? meta_modifier : 0);
+          if (p[1] == 1)
+            {
+              if (code < 32 || (code >= 127 && code <= 159) || code > 0x10ffff
+                  || (code >= 0xd800 && code <= 0xdfff)) goto malformed;
+              event.kind = code < 128 ? ASCII_KEYSTROKE_EVENT
+                : MULTIBYTE_CHAR_KEYSTROKE_EVENT;
+              event.code = code;
+            }
+          else if (p[1] == 2)
+            {
+              static const unsigned keys[] = {
+                0, 0xff0d, 0xff09, 0xff08, 0xffff, 0xff1b,
+                0xff51, 0xff53, 0xff52, 0xff54, 0xff50, 0xff57,
+                0xff55, 0xff56, 0xff63,
+                0xffbe, 0xffbf, 0xffc0, 0xffc1, 0xffc2, 0xffc3,
+                0xffc4, 0xffc5, 0xffc6, 0xffc7, 0xffc8, 0xffc9
+              };
+              if (!code || code >= ARRAYELTS (keys)) goto malformed;
+              event.kind = NON_ASCII_KEYSTROKE_EVENT;
+              event.code = keys[code];
+            }
+          else goto malformed;
         }
-      else goto malformed;
       in->used = 0;
       remote_count (&in->accepted);
-      kbd_buffer_store_event_hold (&event, hold_quit);
-      ++events;
-      /* Let gobble_input deliver the quit immediately.  Do not drain an
-         unbounded peer stream after a quit.  Later packets stay ordered. */
+      /* At most eight wheel events can cross the half-full ring threshold;
+         this cannot fill the remaining half of Emacs's keyboard ring. */
+      for (unsigned i = 0; i < count; ++i)
+        kbd_buffer_store_event_hold (&event, hold_quit);
+      events += count;
       if (hold_quit && hold_quit->kind != NO_EVENT) return 0;
       continue;
     malformed:
@@ -128,8 +205,30 @@ remote_read_socket (struct terminal *t, struct input_event *hold_quit)
       remote_disconnect (d);
       break;
     }
+  in->yield = events > 0;
   /* EOF is a peer disconnect, never the terminal-hangup return value -2. */
   return events;
+}
+
+void
+remote_mouse_position (struct frame **frame, int insist,
+                       Lisp_Object *bar_window, enum scroll_bar_part *part,
+                       Lisp_Object *x, Lisp_Object *y, Time *time)
+{
+  block_input ();
+  struct remote_input *in = FRAME_DISPLAY_INFO (*frame)->input;
+  *bar_window = Qnil;
+  *part = 0;
+  (*frame)->mouse_moved = false;
+  if (in && in->position_valid)
+    {
+      *x = make_fixnum (in->x);
+      *y = make_fixnum (in->y);
+      *time = in->time;
+    }
+  else
+    *frame = NULL;
+  unblock_input ();
 }
 
 /* Listener readiness runs in the ordinary process wait loop, not SIGIO. */
@@ -155,7 +254,13 @@ remote_accept (int fd, void *data)
       else
         {
           in->peer = peer;
-          in->used = 0;
+          in->used = in->buttons = 0;
+          in->yield = in->position_valid = false;
+          struct input_event reset;
+          EVENT_INIT (reset);
+          reset.kind = MOUSE_RESET_EVENT;
+          XSETFRAME (reset.frame_or_window, in->frame);
+          kbd_buffer_store_event (&reset);
           d->highlight_frame = in->frame;
           SET_FRAME_GARBAGED (in->frame);
           add_keyboard_wait_descriptor (peer);
@@ -189,10 +294,10 @@ remote_input_close (struct remote_display_info *d)
 }
 
 DEFUN ("remote-input-listen", Fremote_input_listen, Sremote_input_listen, 2, 2, 0,
-       doc: /* Listen for one native keyboard peer for FRAME at SOCKET.
+       doc: /* Listen for one native keyboard/pointer peer for FRAME at SOCKET.
 SOCKET must not exist and must be inside a directory owned by this user
 with no group/other permissions.  Deleting FRAME closes and removes it.
-This Linux experiment accepts only version 1 bounded key packets. */)
+Accept version 1 bounded key packets and version 2 bounded pointer packets. */)
   (Lisp_Object frame, Lisp_Object path)
 {
   CHECK_LIVE_FRAME (frame);

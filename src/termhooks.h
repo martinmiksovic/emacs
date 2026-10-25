@@ -119,6 +119,15 @@ enum event_kind
 				   .timestamp gives a timestamp (in
 				   milliseconds) for the keystroke.  */
   TIMER_EVENT,                  /* A timer fired.  */
+  /* Ordered frame-owned motion for transports that cannot query a platform
+     event queue.  Pixel x/y, timestamp, modifiers and held-button mask in code.
+     Converted by the command loop only while tracking the mouse.  */
+  MOUSE_MOTION_EVENT,
+
+  /* An input peer was replaced.  Retire its keyboard's click history in the
+     ordinary event consumer, never by mutating Lisp objects from SIGIO.  */
+  MOUSE_RESET_EVENT,
+
   MOUSE_CLICK_EVENT,		/* The button number is in .code; it must
 				   be >= 0 and < NUM_MOUSE_BUTTONS, defined
 				   below.

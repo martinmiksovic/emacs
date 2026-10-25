@@ -3651,10 +3651,7 @@ readable_events (int flags)
       /* See https://lists.gnu.org/r/emacs-devel/2005-05/msg00297.html
 	 for why we treat toolkit scroll-bar events specially here.  */
       if (flags & (READABLE_EVENTS_FILTER_EVENTS
-#ifdef USE_TOOLKIT_SCROLL_BARS
-		   | READABLE_EVENTS_IGNORE_SQUEEZABLES
-#endif
-		   ))
+                   | READABLE_EVENTS_IGNORE_SQUEEZABLES))
         {
           union buffered_input_event *event = kbd_fetch_ptr;
 
@@ -3676,7 +3673,8 @@ readable_events (int flags)
 		       && event->ie.part == scroll_bar_handle
 		       && event->ie.modifiers == 0)
 #endif
-		 )
+                  && !((flags & READABLE_EVENTS_IGNORE_SQUEEZABLES)
+                       && event->kind == MOUSE_MOTION_EVENT))
 		return 1;
 	      event = next_kbd_event (event);
 	    }
@@ -3956,6 +3954,7 @@ discard_mouse_events (void)
        sp != kbd_store_ptr; sp = next_kbd_event (sp))
     {
       if (sp->kind == MOUSE_CLICK_EVENT
+          || sp->kind == MOUSE_MOTION_EVENT
 	  || sp->kind == WHEEL_EVENT
           || sp->kind == HORIZ_WHEEL_EVENT
 	  || sp->kind == SCROLL_BAR_CLICK_EVENT
@@ -4197,6 +4196,28 @@ kbd_buffer_get_event (KBOARD **kbp,
     {
       union buffered_input_event *event = kbd_fetch_ptr;
 
+      /* Coalesce only adjacent motion with identical owner, buttons and
+         modifiers.  A key, button or wheel is an ordering barrier.  The reader
+         never mutates a slot currently being converted by the consumer.  */
+      if (event->kind == MOUSE_MOTION_EVENT)
+        {
+          block_input ();
+          union buffered_input_event *next = next_kbd_event (event);
+          while (next != kbd_store_ptr && next->kind == MOUSE_MOTION_EVENT
+                 && EQ (next->ie.frame_or_window, event->ie.frame_or_window)
+                 && next->ie.code == event->ie.code
+                 && next->ie.modifiers == event->ie.modifiers)
+            {
+              event = next;
+              next = next_kbd_event (event);
+            }
+          kbd_fetch_ptr = event;
+          /* Hover alone must not generate a switch-frame event.  */
+          if (NILP (track_mouse) || ignore_mouse_drag_p)
+            event->kind = NO_EVENT;
+          unblock_input ();
+        }
+
       *kbp = event_to_kboard (&event->ie);
       if (*kbp == 0)
 	*kbp = current_kboard;  /* Better than returning null ptr?  */
@@ -4253,6 +4274,14 @@ kbd_buffer_get_event (KBOARD **kbp,
 	}
 	break;
 #endif
+
+      case MOUSE_RESET_EVENT:
+        {
+          KBOARD *kb = event_to_kboard (&event->ie);
+          if (kb) kb->mouse_state_ = Qnil;
+          kbd_fetch_ptr = next_kbd_event (event);
+        }
+        break;
 
       case MONITORS_CHANGED_EVENT:
 	{
@@ -5652,38 +5681,40 @@ static short const internal_border_parts[] = {
   SYMBOL_INDEX (Qbottom_left_corner)
 };
 
-/* A vector, indexed by button number, giving the down-going location
-   of currently depressed buttons, both scroll bar and non-scroll bar.
+/* Pointer history belongs to a keyboard, just like command and prefix state.
+   Keep it in a marked Lisp vector: event conversion can call Lisp, which can
+   delete the owning frame/terminal/KBOARD.  A local vector remains GC-visible
+   without retaining a dangling C keyboard pointer across those calls.  */
+enum mouse_state_slot
+{
+  MOUSE_LOCATIONS, MOUSE_FRAME_POS, MOUSE_LINE_WIDTH,
+  MOUSE_BUTTON, MOUSE_X, MOUSE_Y, MOUSE_TIME, MOUSE_COUNT, MOUSE_STATE_SIZE
+};
 
-   The elements have the form
-     (BUTTON-NUMBER MODIFIER-MASK . REST)
-   where REST is the cdr of a position as it would be reported in the event.
+static Lisp_Object
+keyboard_mouse_state (struct input_event *event)
+{
+  KBOARD *kb = event_to_kboard (event);
+  if (!kb) kb = current_kboard;
+  if (NILP (kb->mouse_state_))
+    {
+      Lisp_Object state = Fmake_vector (make_fixnum (MOUSE_STATE_SIZE),
+                                       make_fixnum (0));
+      ASET (state, MOUSE_LOCATIONS, make_nil_vector (5));
+      ASET (state, MOUSE_FRAME_POS, Qnil);
+      kb->mouse_state_ = state;
+    }
+  return kb->mouse_state_;
+}
 
-   The make_lispy_event function stores positions here to tell the
-   difference between click and drag events, and to store the starting
-   location to be included in drag events.  */
-
-static Lisp_Object button_down_location;
-
-/* A cons recording the original frame-relative x and y coordinates of
-   the down mouse event.  */
-static Lisp_Object frame_relative_event_pos;
-
-/* The line-number display width, in columns, at the time of most
-   recent down mouse event.  */
-static int down_mouse_line_number_width;
-
-/* Information about the most recent up-going button event:  Which
-   button, what location, and what time.  */
-
-static int last_mouse_button;
-static int last_mouse_x;
-static int last_mouse_y;
-static Time button_down_time;
-
-/* The number of clicks in this multiple-click.  */
-
-static int double_click_count;
+static Time
+mouse_state_time (Lisp_Object state)
+{
+  uintmax_t time = 0;
+  bool valid = integer_to_uintmax (AREF (state, MOUSE_TIME), &time);
+  eassert (valid);
+  return time;
+}
 
 enum frame_border_side
 {
@@ -6164,11 +6195,11 @@ coords_in_tab_bar_window (struct frame *f, int x, int y)
 
 #endif /* HAVE_WINDOW_SYSTEM */
 
-static void
+static int
 save_line_number_display_width (struct input_event *event)
 {
   struct window *w;
-  int pixel_width;
+  int pixel_width, columns;
 
   if (WINDOWP (event->frame_or_window))
     w = XWINDOW (event->frame_or_window);
@@ -6176,7 +6207,8 @@ save_line_number_display_width (struct input_event *event)
     w = XWINDOW (XFRAME (event->frame_or_window)->selected_window);
   else
     w = XWINDOW (selected_window);
-  line_number_display_width (w, &down_mouse_line_number_width, &pixel_width);
+  line_number_display_width (w, &columns, &pixel_width);
+  return columns;
 }
 
 /* Return non-zero if the change of position from START_POS to END_POS
@@ -6186,7 +6218,8 @@ save_line_number_display_width (struct input_event *event)
    This is used to decide whether to converts mouse-down followed by
    mouse-up event into a mouse-drag event.  */
 static bool
-line_number_mode_hscroll (Lisp_Object start_pos, Lisp_Object end_pos)
+line_number_mode_hscroll (Lisp_Object start_pos, Lisp_Object end_pos,
+                          int down_mouse_line_number_width)
 {
   if (!EQ (Fcar (start_pos), Fcar (end_pos)) /* different window */
       || list_length (start_pos) < 7	     /* no COL/ROW info */
@@ -6227,6 +6260,7 @@ static Lisp_Object
 make_lispy_event (struct input_event *event)
 {
   int i;
+  Lisp_Object mouse_state = keyboard_mouse_state (event);
 
   switch (event->kind)
     {
@@ -6339,7 +6373,7 @@ make_lispy_event (struct input_event *event)
 	if ((event->code) == 040
 	    && event->modifiers & shift_modifier)
 	  c |= shift_modifier;
-	button_down_time = 0;
+	ASET (mouse_state, MOUSE_TIME, INT_TO_INTEGER (0));
 	XSETFASTINT (lispy_c, c);
 	return lispy_c;
       }
@@ -6358,7 +6392,7 @@ make_lispy_event (struct input_event *event)
       /* A function key.  The symbol may need to have modifier prefixes
 	 tacked onto it.  */
     case NON_ASCII_KEYSTROKE_EVENT:
-      button_down_time = 0;
+      ASET (mouse_state, MOUSE_TIME, INT_TO_INTEGER (0));
 
       for (i = 0; i < ARRAYELTS (lispy_accent_codes); i++)
 	if (event->code == lispy_accent_codes[i])
@@ -6437,6 +6471,13 @@ make_lispy_event (struct input_event *event)
 
       /* A mouse click.  Figure out where it is, decide whether it's
          a press, click or drag, and build the appropriate structure.  */
+    case MOUSE_MOTION_EVENT:
+      if (!FRAMEP (event->frame_or_window)
+          || !FRAME_LIVE_P (XFRAME (event->frame_or_window)))
+        return Qnil;
+      return make_lispy_movement (XFRAME (event->frame_or_window), Qnil, 0,
+                                 event->x, event->y, event->timestamp);
+
     case MOUSE_CLICK_EVENT:
 #ifndef USE_TOOLKIT_SCROLL_BARS
     case SCROLL_BAR_CLICK_EVENT:
@@ -6446,7 +6487,8 @@ make_lispy_event (struct input_event *event)
 	int button = event->code;
 	bool is_double;
 	Lisp_Object position;
-	Lisp_Object *start_pos_ptr;
+        Lisp_Object event_frame = event->frame_or_window;
+	Lisp_Object locations;
 	Lisp_Object start_pos;
 
 	position = Qnil;
@@ -6553,17 +6595,19 @@ make_lispy_event (struct input_event *event)
 	  position = make_scroll_bar_position (event, Qvertical_scroll_bar);
 #endif /* not USE_TOOLKIT_SCROLL_BARS */
 
-	if (button >= ASIZE (button_down_location))
+	locations = AREF (mouse_state, MOUSE_LOCATIONS);
+	if (button >= ASIZE (locations))
 	  {
-	    ptrdiff_t incr = button - ASIZE (button_down_location) + 1;
-	    button_down_location = larger_vector (button_down_location,
-						  incr, -1);
-	    mouse_syms = larger_vector (mouse_syms, incr, -1);
+	    ptrdiff_t incr = button - ASIZE (locations) + 1;
+	    locations = larger_vector (locations, incr, -1);
+	    ASET (mouse_state, MOUSE_LOCATIONS, locations);
 	  }
 
-	start_pos_ptr = aref_addr (button_down_location, button);
-	start_pos = *start_pos_ptr;
-	*start_pos_ptr = Qnil;
+	if (button >= ASIZE (mouse_syms))
+          mouse_syms = larger_vector (mouse_syms,
+                                      button - ASIZE (mouse_syms) + 1, -1);
+	start_pos = AREF (locations, button);
+	ASET (locations, button, Qnil);
 
 	{
 	  /* On window-system frames, use the value of
@@ -6584,19 +6628,21 @@ make_lispy_event (struct input_event *event)
 	  else
 	    fuzz = double_click_fuzz / 8;
 
-	  is_double = (button == last_mouse_button
-		       && (eabs (XFIXNUM (event->x) - last_mouse_x) <= fuzz)
-		       && (eabs (XFIXNUM (event->y) - last_mouse_y) <= fuzz)
-		       && button_down_time != 0
+	  is_double = (button == XFIXNUM (AREF (mouse_state, MOUSE_BUTTON))
+                       && eabs (XFIXNUM (event->x)
+                                - XFIXNUM (AREF (mouse_state, MOUSE_X))) <= fuzz
+                       && eabs (XFIXNUM (event->y)
+                                - XFIXNUM (AREF (mouse_state, MOUSE_Y))) <= fuzz
+		       && mouse_state_time (mouse_state) != 0
 		       && (EQ (Vdouble_click_time, Qt)
 			   || (FIXNATP (Vdouble_click_time)
-			       && (event->timestamp - button_down_time
+			       && (event->timestamp - mouse_state_time (mouse_state)
 				   < XFIXNAT (Vdouble_click_time)))));
 	}
 
-	last_mouse_button = button;
-	last_mouse_x = XFIXNUM (event->x);
-	last_mouse_y = XFIXNUM (event->y);
+	ASET (mouse_state, MOUSE_BUTTON, make_fixnum (button));
+	ASET (mouse_state, MOUSE_X, event->x);
+	ASET (mouse_state, MOUSE_Y, event->y);
 
 	/* If this is a button press, squirrel away the location, so
            we can decide later whether it was a click or a drag.  */
@@ -6604,19 +6650,22 @@ make_lispy_event (struct input_event *event)
 	  {
 	    if (is_double)
 	      {
-		double_click_count++;
-		event->modifiers |= ((double_click_count > 2)
+		ASET (mouse_state, MOUSE_COUNT,
+                make_fixnum (min (XFIXNUM (AREF (mouse_state, MOUSE_COUNT)),
+                                  MOST_POSITIVE_FIXNUM - 1) + 1));
+		event->modifiers |= ((XFIXNUM (AREF (mouse_state, MOUSE_COUNT)) > 2)
 				     ? triple_modifier
 				     : double_modifier);
 	      }
 	    else
-	      double_click_count = 1;
-	    button_down_time = event->timestamp;
-	    *start_pos_ptr = Fcopy_alist (position);
-	    frame_relative_event_pos = Fcons (event->x, event->y);
+	      ASET (mouse_state, MOUSE_COUNT, make_fixnum (1));
+	    ASET (mouse_state, MOUSE_TIME, INT_TO_INTEGER (event->timestamp));
+	    ASET (locations, button, Fcopy_alist (position));
+	    ASET (mouse_state, MOUSE_FRAME_POS, Fcons (event->x, event->y));
 	    ignore_mouse_drag_p = false;
 	    /* Squirrel away the line-number width, if any.  */
-	    save_line_number_display_width (event);
+	    ASET (mouse_state, MOUSE_LINE_WIDTH,
+                  make_fixnum (save_line_number_display_width (event)));
 	  }
 
 	/* Now we're releasing a button - check the coordinates to
@@ -6641,9 +6690,9 @@ make_lispy_event (struct input_event *event)
 		intmax_t xdiff = double_click_fuzz, ydiff = double_click_fuzz;
 
 		xdiff = XFIXNUM (event->x)
-		  - XFIXNUM (XCAR (frame_relative_event_pos));
+		  - XFIXNUM (XCAR (AREF (mouse_state, MOUSE_FRAME_POS)));
 		ydiff = XFIXNUM (event->y)
-		  - XFIXNUM (XCDR (frame_relative_event_pos));
+		  - XFIXNUM (XCDR (AREF (mouse_state, MOUSE_FRAME_POS)));
 
 		if (! (0 < double_click_fuzz
 		       && - double_click_fuzz < xdiff
@@ -6664,16 +6713,17 @@ make_lispy_event (struct input_event *event)
 			       Fcar (Fcdr (position))) /* Same buffer pos */
 			   /* Redisplay hscrolled text between down- and
                               up-events due to display-line-numbers-mode.  */
-			   || line_number_mode_hscroll (start_pos, position)
+			   || line_number_mode_hscroll (start_pos, position,
+                        XFIXNUM (AREF (mouse_state, MOUSE_LINE_WIDTH)))
 			   || !EQ (Fcar (start_pos),
 				   Fcar (position))))) /* Different window */
 
 		  {
 		    /* Mouse has moved enough.  */
-		    button_down_time = 0;
+		    ASET (mouse_state, MOUSE_TIME, INT_TO_INTEGER (0));
 		    click_or_drag_modifier = drag_modifier;
 		    /* Reset the value for future clicks.  */
-		    down_mouse_line_number_width = -1;
+		    ASET (mouse_state, MOUSE_LINE_WIDTH, make_fixnum (-1));
 		  }
 		else if (((!EQ (Fcar (start_pos), Fcar (position)))
 			  || (!EQ (Fcar (Fcdr (start_pos)),
@@ -6691,8 +6741,8 @@ make_lispy_event (struct input_event *event)
 		  {
 		    Lisp_Object edges
 		      = calln (Qwindow_edges, Fcar (start_pos), Qt, Qnil, Qt);
-		    int new_x = XFIXNUM (Fcar (frame_relative_event_pos));
-		    int new_y = XFIXNUM (Fcdr (frame_relative_event_pos));
+		    int new_x = XFIXNUM (Fcar (AREF (mouse_state, MOUSE_FRAME_POS)));
+		    int new_y = XFIXNUM (Fcdr (AREF (mouse_state, MOUSE_FRAME_POS)));
 
 		    /* If the up-event is outside the down-event's
 		       window, use coordinates that are within it.  */
@@ -6706,8 +6756,10 @@ make_lispy_event (struct input_event *event)
 			     >= XFIXNUM (Fcar (Fcdr (Fcdr (Fcdr (edges))))))
 		      new_y = XFIXNUM (Fcar (Fcdr (Fcdr (Fcdr (edges))))) - 1;
 
+                    if (!FRAME_LIVE_P (XFRAME (event_frame)))
+                      return Qnil;
 		    position = make_lispy_position
-		      (XFRAME (event->frame_or_window),
+		      (XFRAME (event_frame),
 		       make_fixnum (new_x), make_fixnum (new_y),
 		       event->timestamp);
 		  }
@@ -6718,8 +6770,8 @@ make_lispy_event (struct input_event *event)
 	    event->modifiers
 	      = ((event->modifiers & ~up_modifier)
 		 | click_or_drag_modifier
-		 | (double_click_count < 2 ? 0
-		    : double_click_count == 2 ? double_modifier
+		 | (XFIXNUM (AREF (mouse_state, MOUSE_COUNT)) < 2 ? 0
+		    : XFIXNUM (AREF (mouse_state, MOUSE_COUNT)) == 2 ? double_modifier
 		    : triple_modifier));
 	  }
 	else
@@ -6740,7 +6792,7 @@ make_lispy_event (struct input_event *event)
 	  if (event->modifiers & drag_modifier)
 	    return list3 (head, start_pos, position);
 	  else if (event->modifiers & (double_modifier | triple_modifier))
-	    return list3 (head, position, make_fixnum (double_click_count));
+	    return list3 (head, position, AREF (mouse_state, MOUSE_COUNT));
 	  else
 	    return list2 (head, position);
 	}
@@ -6803,32 +6855,36 @@ make_lispy_event (struct input_event *event)
           if (event->kind == HORIZ_WHEEL_EVENT)
             symbol_num += 2;
 
-	  is_double = (last_mouse_button == - (1 + symbol_num)
-		       && (eabs (XFIXNUM (event->x) - last_mouse_x) <= fuzz)
-		       && (eabs (XFIXNUM (event->y) - last_mouse_y) <= fuzz)
-		       && button_down_time != 0
+	  is_double = (XFIXNUM (AREF (mouse_state, MOUSE_BUTTON)) == - (1 + symbol_num)
+                       && eabs (XFIXNUM (event->x)
+                                - XFIXNUM (AREF (mouse_state, MOUSE_X))) <= fuzz
+                       && eabs (XFIXNUM (event->y)
+                                - XFIXNUM (AREF (mouse_state, MOUSE_Y))) <= fuzz
+		       && mouse_state_time (mouse_state) != 0
 		       && (EQ (Vdouble_click_time, Qt)
 			   || (FIXNATP (Vdouble_click_time)
-			       && (event->timestamp - button_down_time
+			       && (event->timestamp - mouse_state_time (mouse_state)
 				   < XFIXNAT (Vdouble_click_time)))));
 	  if (is_double)
 	    {
-	      double_click_count++;
-	      event->modifiers |= ((double_click_count > 2)
+	      ASET (mouse_state, MOUSE_COUNT,
+                make_fixnum (min (XFIXNUM (AREF (mouse_state, MOUSE_COUNT)),
+                                  MOST_POSITIVE_FIXNUM - 1) + 1));
+	      event->modifiers |= ((XFIXNUM (AREF (mouse_state, MOUSE_COUNT)) > 2)
 				   ? triple_modifier
 				   : double_modifier);
 	    }
 	  else
 	    {
-	      double_click_count = 1;
+	      ASET (mouse_state, MOUSE_COUNT, make_fixnum (1));
 	      event->modifiers |= click_modifier;
 	    }
 
-	  button_down_time = event->timestamp;
+	  ASET (mouse_state, MOUSE_TIME, INT_TO_INTEGER (event->timestamp));
 	  /* Use a negative value to distinguish wheel from mouse button.  */
-	  last_mouse_button = - (1 + symbol_num);
-	  last_mouse_x = XFIXNUM (event->x);
-	  last_mouse_y = XFIXNUM (event->y);
+	  ASET (mouse_state, MOUSE_BUTTON, make_fixnum (- (1 + symbol_num)));
+	  ASET (mouse_state, MOUSE_X, event->x);
+	  ASET (mouse_state, MOUSE_Y, event->y);
 
 	  /* Get the symbol we should use for the wheel event.  */
 	  head = modify_event_symbol (symbol_num,
@@ -6841,7 +6897,7 @@ make_lispy_event (struct input_event *event)
 	}
 
 	if (CONSP (event->arg))
-	  return list5 (head, position, make_fixnum (double_click_count),
+	  return list5 (head, position, AREF (mouse_state, MOUSE_COUNT),
 			XCAR (event->arg),
 			/* FIXME: When a mouse-click on a tab-bar is
                            converted into a wheel-event we get here something
@@ -6854,10 +6910,10 @@ make_lispy_event (struct input_event *event)
 			   we just use nil.  */
 			: Qnil);
         else if (NUMBERP (event->arg))
-          return list4 (head, position, make_fixnum (double_click_count),
+          return list4 (head, position, AREF (mouse_state, MOUSE_COUNT),
                         event->arg);
 	else if (event->modifiers & (double_modifier | triple_modifier))
-	  return list3 (head, position, make_fixnum (double_click_count));
+	  return list3 (head, position, AREF (mouse_state, MOUSE_COUNT));
 	else
 	  return list2 (head, position);
       }
@@ -13115,6 +13171,7 @@ init_kboard (KBOARD *kb, Lisp_Object type)
   kset_prefix_arg (kb, Qnil);
   kset_last_prefix_arg (kb, Qnil);
   kset_kbd_queue (kb, Qnil);
+  kb->mouse_state_ = Qnil;
   kb->kbd_queue_has_data = false;
   kb->immediate_echo = false;
   kset_echo_string (kb, Qnil);
@@ -13346,6 +13403,12 @@ is_ignored_event (union buffered_input_event *event)
 
   switch (event->kind)
     {
+    case MOUSE_RESET_EVENT:
+      return true;
+    case MOUSE_MOTION_EVENT:
+      if (NILP (track_mouse)) return true;
+      ignore_event = Qmouse_movement;
+      break;
     case FOCUS_IN_EVENT:
       ignore_event = Qfocus_in;
       break;
@@ -13625,9 +13688,6 @@ This is effective only in `noninteractive' sessions.  */);
 
   DEFSYM (Qpreedit_text, "preedit-text");
 
-  button_down_location = make_nil_vector (5);
-  staticpro (&button_down_location);
-  staticpro (&frame_relative_event_pos);
   mouse_syms = make_nil_vector (5);
   staticpro (&mouse_syms);
   wheel_syms = make_nil_vector (ARRAYELTS (lispy_wheel_names));
@@ -14626,6 +14686,7 @@ mark_kboards (void)
       mark_object (KVAR (kb, Vprefix_arg));
       mark_object (KVAR (kb, Vlast_prefix_arg));
       mark_object (KVAR (kb, kbd_queue));
+      mark_object (kb->mouse_state_);
       mark_object (KVAR (kb, defining_kbd_macro));
       mark_object (KVAR (kb, Vlast_kbd_macro));
       mark_object (KVAR (kb, Vsystem_key_alist));

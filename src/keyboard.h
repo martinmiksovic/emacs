@@ -111,6 +111,9 @@ struct kboard
     /* Unread events specific to this kboard.  */
     Lisp_Object kbd_queue_;
 
+    /* GC-owned click/drag history, independent of other keyboards.  */
+    Lisp_Object mouse_state_;
+
     /* Non-nil while a kbd macro is being defined.  */
     Lisp_Object defining_kbd_macro_;
 
