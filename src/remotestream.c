@@ -175,7 +175,8 @@ stream_io (int fd, void *data)
           char welcome[256];
           int n = snprintf (welcome, sizeof welcome,
             "{\"protocol\":\"remote-emacs-live\",\"version\":1,\"display_version\":1,"
-            "\"max_record\":%d,\"transaction_base\":%lu,\"presentation_base\":%lu}",
+            "\"max_record\":%d,\"transaction_base\":%lu,\"presentation_base\":%lu,"
+            "\"input_versions\":[1,2]}",
             RECORD_LIMIT, d->transaction, d->presentations);
           queue_record (d, welcome, n);
           s->seq = 0; s->active = true;
