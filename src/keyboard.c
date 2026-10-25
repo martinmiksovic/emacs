@@ -4214,7 +4214,15 @@ kbd_buffer_get_event (KBOARD **kbp,
           kbd_fetch_ptr = event;
           /* Hover alone must not generate a switch-frame event.  */
           if (NILP (track_mouse) || ignore_mouse_drag_p)
-            event->kind = NO_EVENT;
+            {
+              kbd_fetch_ptr = next_kbd_event (event);
+              unblock_input ();
+              input_pending = readable_events (0);
+              /* Administrative select-frame can clear internal_last_event_frame.
+                 Passive hover must not copy that into last-event-frame: no
+                 command-loop event occurred and no keyboard gained focus.  */
+              return Qnil;
+            }
           unblock_input ();
         }
 
@@ -4280,8 +4288,11 @@ kbd_buffer_get_event (KBOARD **kbp,
           KBOARD *kb = event_to_kboard (&event->ie);
           if (kb) kb->mouse_state_ = Qnil;
           kbd_fetch_ptr = next_kbd_event (event);
+          *kbp = current_kboard;
+          *event_frame = NULL;
+          input_pending = readable_events (0);
+          return Qnil;
         }
-        break;
 
       case MONITORS_CHANGED_EVENT:
 	{
