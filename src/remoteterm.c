@@ -1,5 +1,5 @@
 /* Native headless remote-display experiment.  GPL-3.0-or-later.
-   This records authoritative Emacs geometry; it is not an interactive GUI. */
+   Each native frame owns a terminal, keyboard and independent display state. */
 #include <config.h>
 #include <math.h>
 #include <stdarg.h>
@@ -22,7 +22,6 @@
 #define REMOTE_FONT "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 #define REMOTE_HASH "a54dca07c76d6289e717e75e0a58c0128f6d7269ef3faf76417c9d7d3bba37ab"
 struct remote_display_info *x_display_list;
-static Lisp_Object remote_display_name;
 static struct font_driver remote_font_driver;
 static frame_parm_handler remote_parm_handlers[51]; /* frame.c, this revision. */
 
@@ -213,8 +212,10 @@ remote_delete_terminal (struct terminal *t)
   struct remote_display_info *d = t->display_info.remote;
   delete_terminal (t); /* First delete live frames, then keyboard/coding state. */
   if (d->record) fclose (d->record);
-  x_display_list = NULL;
-  remote_display_name = Qnil;
+  struct remote_display_info **link = &x_display_list;
+  while (*link && *link != d) link = &(*link)->next;
+  eassert (*link == d);
+  *link = d->next;
   xfree (d);
   t->display_info.remote = NULL;
 }
@@ -280,14 +281,14 @@ static void remote_unsupported_param (struct frame *f,Lisp_Object n,Lisp_Object 
 
 DEFUN ("remote-create-frame", Fremote_create_frame, Sremote_create_frame, 1, 1, 0,
        doc: /* Create a native headless recorder frame, writing JSON lines to FILE.
-Only one remote frame may exist.  Requires the pinned DejaVu Sans Mono font.
+Each frame owns a distinct terminal and keyboard.
+Requires the pinned DejaVu Sans Mono font.
 Use `delete-frame' or `delete-terminal' for normal lifecycle cleanup.
 FILE may be nil to disable diagnostic disk writes.  Use the separate
 `remote-input-listen' and `remote-display-listen' endpoints to attach a client.  */)
   (Lisp_Object file)
 {
   if (!NILP (file)) CHECK_STRING (file);
-  if (x_display_list) error ("Only one remote recorder frame is supported");
   if (!NILP (file)) file = Fexpand_file_name (file,Qnil);
   /* Preflight before constructing a frame; never abort inside face setup
      because the resource was absent or mismatched. */
@@ -303,7 +304,9 @@ FILE may be nil to disable diagnostic disk writes.  Use the separate
   d->smallest_char_width = 10; d->smallest_font_height = 19;
   reset_mouse_highlight (&d->mouse_highlight);
   struct terminal *t = create_terminal (output_remote,&remote_redisplay);
-  t->name = xstrdup ("remote-recorder"); t->display_info.remote = d;
+  char name[64];
+  snprintf (name, sizeof name, "remote-native-%d", t->id);
+  t->name = xstrdup (name); t->display_info.remote = d;
   d->terminal = t;
   t->kboard = allocate_kboard (Qremote); t->kboard->reference_count++;
   t->read_socket_hook = remote_read_socket;
@@ -326,10 +329,12 @@ FILE may be nil to disable diagnostic disk writes.  Use the separate
   FRAME_DISPLAY_INFO (f) = d; FRAME_FONTSET (f) = -1;
   specpdl_ref count = SPECPDL_INDEX ();
   record_unwind_protect (remote_unwind_frame,frame);
+  d->next = x_display_list;
   x_display_list = d;
-  remote_display_name = Fcons (build_string ("remote-recorder"),Qnil);
-  d->name_list_element = remote_display_name;
-  fset_name (f,build_string ("Remote recorder"));
+  /* compact_font_caches marks this through TERMINAL_FONT_CACHE for every
+     live terminal.  Never share a cache cell between native displays. */
+  d->name_list_element = Fcons (build_string (name), Qnil);
+  fset_name (f, build_string (name));
   FRAME_FOREGROUND_PIXEL (f) = 0; FRAME_BACKGROUND_PIXEL (f) = 0xffffff;
   f->left_fringe_width = f->right_fringe_width = 0;
   f->vertical_scroll_bar_type = vertical_scroll_bar_none;
@@ -414,7 +419,6 @@ syms_of_remote (void)
   syms_of_remote_input ();
   syms_of_remote_stream ();
   DEFSYM (Qremote,"remote");
-  remote_display_name = Qnil; staticpro (&remote_display_name);
   pdumper_do_now_and_after_load (remote_init_runtime);
   defsubr (&Sxw_display_color_p); defsubr (&Sx_display_grayscale_p);
   defsubr (&Sremote_create_frame); defsubr (&Sremote_recorder_status);
