@@ -310,6 +310,7 @@ FILE may be nil to disable diagnostic disk writes.  Use the separate
   d->terminal = t;
   t->kboard = allocate_kboard (Qremote); t->kboard->reference_count++;
   t->read_socket_hook = remote_read_socket;
+  t->mouse_position_hook = remote_mouse_position;
   t->delete_frame_hook = remote_delete_frame;
   t->delete_terminal_hook = remote_delete_terminal;
   t->set_new_font_hook = remote_new_font; t->defined_color_hook = remote_color;
