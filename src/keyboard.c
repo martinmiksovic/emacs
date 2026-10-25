@@ -4212,8 +4212,10 @@ kbd_buffer_get_event (KBOARD **kbp,
               next = next_kbd_event (event);
             }
           kbd_fetch_ptr = event;
-          /* Hover alone must not generate a switch-frame event.  */
-          if (NILP (track_mouse) || ignore_mouse_drag_p)
+          /* Tracking belongs to the active keyboard.  Another terminal's
+             hover must not queue a switch-frame event while it is active.  */
+          if (NILP (track_mouse) || ignore_mouse_drag_p
+              || event_to_kboard (&event->ie) != current_kboard)
             {
               kbd_fetch_ptr = next_kbd_event (event);
               unblock_input ();
