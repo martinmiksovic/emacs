@@ -5705,11 +5705,11 @@ enum mouse_state_slot
 };
 
 static Lisp_Object
-keyboard_mouse_state (struct input_event *event)
+keyboard_mouse_state (struct input_event *event, bool create)
 {
   KBOARD *kb = event_to_kboard (event);
   if (!kb) kb = current_kboard;
-  if (NILP (kb->mouse_state_))
+  if (create && NILP (kb->mouse_state_))
     {
       Lisp_Object state = Fmake_vector (make_fixnum (MOUSE_STATE_SIZE),
                                        make_fixnum (0));
@@ -6273,7 +6273,9 @@ static Lisp_Object
 make_lispy_event (struct input_event *event)
 {
   int i;
-  Lisp_Object mouse_state = keyboard_mouse_state (event);
+  /* Ordinary keys only invalidate existing click history.  Do not allocate
+     pointer state for keyboards that have never delivered a pointer event.  */
+  Lisp_Object mouse_state = keyboard_mouse_state (event, false);
 
   switch (event->kind)
     {
@@ -6386,7 +6388,8 @@ make_lispy_event (struct input_event *event)
 	if ((event->code) == 040
 	    && event->modifiers & shift_modifier)
 	  c |= shift_modifier;
-	ASET (mouse_state, MOUSE_TIME, INT_TO_INTEGER (0));
+	if (!NILP (mouse_state))
+          ASET (mouse_state, MOUSE_TIME, make_fixnum (0));
 	XSETFASTINT (lispy_c, c);
 	return lispy_c;
       }
@@ -6405,7 +6408,8 @@ make_lispy_event (struct input_event *event)
       /* A function key.  The symbol may need to have modifier prefixes
 	 tacked onto it.  */
     case NON_ASCII_KEYSTROKE_EVENT:
-      ASET (mouse_state, MOUSE_TIME, INT_TO_INTEGER (0));
+      if (!NILP (mouse_state))
+        ASET (mouse_state, MOUSE_TIME, make_fixnum (0));
 
       for (i = 0; i < ARRAYELTS (lispy_accent_codes); i++)
 	if (event->code == lispy_accent_codes[i])
@@ -6504,6 +6508,7 @@ make_lispy_event (struct input_event *event)
 	Lisp_Object locations;
 	Lisp_Object start_pos;
 
+        mouse_state = keyboard_mouse_state (event, true);
 	position = Qnil;
 
 	/* Build the position as appropriate for this mouse click.  */
@@ -6816,6 +6821,8 @@ make_lispy_event (struct input_event *event)
       {
 	Lisp_Object position;
 	Lisp_Object head;
+
+        mouse_state = keyboard_mouse_state (event, true);
 
 	/* Build the position as appropriate for this mouse click.  */
 	struct frame *f = XFRAME (event->frame_or_window);
